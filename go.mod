@@ -3,11 +3,14 @@ module bird-zpi/downloader
 go 1.26.1
 
 require (
+	github.com/rabbitmq/amqp091-go v1.15.0
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 )
 
 require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/twpayne/go-proj/v11 v11.1.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect

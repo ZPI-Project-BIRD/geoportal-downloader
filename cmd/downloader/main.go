@@ -12,28 +12,34 @@ import (
 	"syscall"
 
 	downloaderv1 "bird-zpi/downloader/gen/downloader/v1"
-	"bird-zpi/downloader/internal/download"
+	"bird-zpi/downloader/internal/messaging/rabbitmq"
 	grpcapi "bird-zpi/downloader/internal/transport/grpc"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
 
-func newGRPCServer(downloadService grpcapi.DownloadService) *grpc.Server {
+func newGRPCServer(jobPublisher grpcapi.Publisher) *grpc.Server {
 	grpcServer := grpc.NewServer()
-	downloaderv1.RegisterDownloaderServiceServer(grpcServer, grpcapi.NewServer(downloadService))
+	downloaderv1.RegisterDownloaderServiceServer(grpcServer, grpcapi.NewServer(jobPublisher))
 	reflection.Register(grpcServer)
 	return grpcServer
 }
 
-func run(ctx context.Context, address string) error {
+func run(ctx context.Context, address, rabbitMQURL string) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", address, err)
 	}
+	defer listener.Close()
 
-	downloadService := download.NewService()
-	grpcServer := newGRPCServer(downloadService)
+	jobPublisher, err := rabbitmq.NewPublisher(rabbitMQURL)
+	if err != nil {
+		return err
+	}
+	defer jobPublisher.Close()
+
+	grpcServer := newGRPCServer(jobPublisher)
 
 	go func() {
 		<-ctx.Done()
@@ -59,6 +65,7 @@ func main() {
 	defer stop()
 
 	address := flag.String("address", "127.0.0.1:50051", "ip address with port that the gRPC server will listen on")
+	rabbitMQURL := flag.String("rabbitmq-url", rabbitmq.DefaultURL, "RabbitMQ connection URL")
 	flag.Parse()
 
 	_, _, err := net.SplitHostPort(*address)
@@ -66,7 +73,7 @@ func main() {
 		printUsage("malformed --address provided")
 	}
 
-	if err := run(ctx, *address); err != nil {
+	if err := run(ctx, *address, *rabbitMQURL); err != nil {
 		log.Fatal(err)
 	}
 }
