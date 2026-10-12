@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package downloader.v1;
+
+option go_package = "bird-zpi/downloader/gen/downloader/v1;downloaderv1";
+
+service DownloaderService {
+  rpc CreateDownload(CreateDownloadRequest) returns (CreateDownloadResponse);
+}
+
+message Point {
+  double x = 1;
+  double y = 2;
+}
+
+message CreateDownloadRequest {
+  string layer = 1;
+  Point top_left = 2;
+  Point bottom_right = 3;
+}
+
+message CreateDownloadResponse {}
