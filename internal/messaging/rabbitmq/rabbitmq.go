@@ -2,7 +2,11 @@ package rabbitmq
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+
+	"bird-zpi/downloader/internal/download"
+	"bird-zpi/downloader/internal/gugik"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -21,7 +25,15 @@ func NewPublisher(url string) (*Publisher, error) {
 	return &Publisher{connection: connection}, nil
 }
 
-func (p *Publisher) Publish(ctx context.Context, queue string, body []byte) error {
+func (p *Publisher) DownloadFeature(ctx context.Context, feature gugik.FeatureMember) error {
+	body, err := json.Marshal(feature)
+	if err != nil {
+		return fmt.Errorf("encode download feature job: %w", err)
+	}
+	return p.publish(ctx, download.DownloadFeatureQueue, body)
+}
+
+func (p *Publisher) publish(ctx context.Context, queue string, body []byte) error {
 	channel, err := p.connection.Channel()
 	if err != nil {
 		return fmt.Errorf("open RabbitMQ channel: %w", err)

@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	downloaderv1 "bird-zpi/downloader/gen/downloader/v1"
+	"bird-zpi/downloader/internal/download"
 	"bird-zpi/downloader/internal/messaging/rabbitmq"
 	grpcapi "bird-zpi/downloader/internal/transport/grpc"
 
@@ -19,9 +20,9 @@ import (
 	"google.golang.org/grpc/reflection"
 )
 
-func newGRPCServer(jobPublisher grpcapi.Publisher) *grpc.Server {
+func newGRPCServer(publisher download.Publisher) *grpc.Server {
 	grpcServer := grpc.NewServer()
-	downloaderv1.RegisterDownloaderServiceServer(grpcServer, grpcapi.NewServer(jobPublisher))
+	downloaderv1.RegisterDownloaderServiceServer(grpcServer, grpcapi.NewServer(publisher))
 	reflection.Register(grpcServer)
 	return grpcServer
 }
