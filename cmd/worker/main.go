@@ -14,13 +14,13 @@ import (
 )
 
 func run(ctx context.Context, rabbitMQURL string) error {
-	service := download.NewService()
+	service := download.NewService(nil)
 	log.Print("download worker started")
 	return worker.Run(
 		ctx,
 		rabbitMQURL,
-		download.CreateDownloadQueue,
-		download.HandleCreateDownload(service.CreateDownload),
+		download.DownloadFeatureQueue,
+		service.HandleDownloadFeature,
 	)
 }
 

@@ -8,17 +8,13 @@ import (
 	"bird-zpi/downloader/internal/download"
 )
 
-type Publisher interface {
-	Publish(context.Context, string, []byte) error
-}
-
 type Server struct {
 	downloaderv1.UnimplementedDownloaderServiceServer
-	jobs Publisher
+	service *download.Service
 }
 
-func NewServer(jobPublisher Publisher) *Server {
-	return &Server{jobs: jobPublisher}
+func NewServer(publisher download.Publisher) *Server {
+	return &Server{service: download.NewService(publisher)}
 }
 
 func (s *Server) CreateDownload(ctx context.Context, request *downloaderv1.CreateDownloadRequest) (*downloaderv1.CreateDownloadResponse, error) {
@@ -32,7 +28,7 @@ func (s *Server) CreateDownload(ctx context.Context, request *downloaderv1.Creat
 		return nil, err
 	}
 
-	if err := download.EnqueueCreateDownload(ctx, s.jobs.Publish, download.CreateRequest{
+	if err := s.service.CreateDownload(ctx, download.CreateRequest{
 		Layer: request.GetLayer(),
 		TopLeft: download.Point{
 			X: topLeftX,
