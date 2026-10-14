@@ -11,3 +11,8 @@ const DownloadFeatureQueue = "download.feature"
 type Publisher interface {
 	DownloadFeature(context.Context, gugik.FeatureMember) error
 }
+
+type RetryPublisher interface {
+	Publisher
+	ProcessorPublisher
+}

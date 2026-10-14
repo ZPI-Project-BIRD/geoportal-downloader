@@ -1,5 +1,3 @@
-// Package gugik contains the XML representation of resources exposed by the
-// GUGiK (Head Office of Geodesy and Cartography) services.
 package gugik
 
 import (
@@ -32,7 +30,6 @@ type FeatureMember struct {
 	OrthophotoIndex OrthophotoIndex `xml:"http://www.gugik.gov.pl SkorowidzOrtofomapy2025"`
 }
 
-// OrthophotoIndex describes one orthophoto sheet available for download.
 type OrthophotoIndex struct {
 	XMLName xml.Name `xml:"http://www.gugik.gov.pl SkorowidzOrtofomapy2025"`
 	ID      string   `xml:"http://www.opengis.net/gml id,attr"`
@@ -87,9 +84,6 @@ type PositionList struct {
 	Ordinates Coordinate `xml:",chardata"`
 }
 
-// Coordinate holds whitespace-separated coordinate ordinates. For a point it
-// contains one tuple; for a GML posList it contains consecutive tuples whose
-// width is given by PositionList.Dimension.
 type Coordinate []float64
 
 func (c *Coordinate) UnmarshalJSON(data []byte) error {
@@ -123,7 +117,6 @@ func (c *Coordinate) UnmarshalText(text []byte) error {
 	return nil
 }
 
-// Date represents the date-only values used by the GUGiK service.
 type Date time.Time
 
 func (d Date) MarshalJSON() ([]byte, error) {

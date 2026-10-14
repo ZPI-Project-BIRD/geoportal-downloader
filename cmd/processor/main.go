@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"bird-zpi/downloader/internal/config"
+	"bird-zpi/downloader/internal/database"
 	"bird-zpi/downloader/internal/processor"
 	"bird-zpi/downloader/internal/storage"
 	"bird-zpi/downloader/internal/worker"
@@ -15,6 +16,7 @@ import (
 
 type configValues struct {
 	RabbitMQURL    string `envconfig:"RABBITMQ_URL" required:"true"`
+	DatabaseURL    string `envconfig:"DATABASE_URL" required:"true"`
 	MinioEndpoint  string `envconfig:"MINIO_ENDPOINT" default:"localhost:9000"`
 	MinioAccessKey string `envconfig:"MINIO_ACCESS_KEY" required:"true"`
 	MinioSecretKey string `envconfig:"MINIO_SECRET_KEY" required:"true"`
@@ -34,31 +36,23 @@ func loadConfig() (configValues, error) {
 }
 
 func run(ctx context.Context, cfg configValues) error {
-	sourceStorage, err := storage.New(
-		ctx,
-		cfg.MinioEndpoint,
-		cfg.MinioAccessKey,
-		cfg.MinioSecretKey,
-		cfg.SourceBucket,
-		cfg.MinioSecure,
-	)
+	featureDatabase, err := database.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer featureDatabase.Close()
+
+	sourceStorage, err := storage.New(ctx, cfg.MinioEndpoint, cfg.MinioAccessKey, cfg.MinioSecretKey, cfg.SourceBucket, cfg.MinioSecure)
 	if err != nil {
 		return err
 	}
 
-	tileStorage, err := storage.New(
-		ctx,
-		cfg.MinioEndpoint,
-		cfg.MinioAccessKey,
-		cfg.MinioSecretKey,
-		cfg.TilesBucket,
-		cfg.MinioSecure,
-	)
+	tileStorage, err := storage.New(ctx, cfg.MinioEndpoint, cfg.MinioAccessKey, cfg.MinioSecretKey, cfg.TilesBucket, cfg.MinioSecure)
 	if err != nil {
 		return err
 	}
 
-	service := processor.NewService(sourceStorage, tileStorage, processor.GDALTiler{
+	service := processor.NewService(featureDatabase, sourceStorage, tileStorage, processor.GDALTiler{
 		Command: cfg.GdalCommand,
 		Zoom:    cfg.Zoom,
 	})

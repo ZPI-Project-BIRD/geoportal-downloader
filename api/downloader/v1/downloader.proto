@@ -6,6 +6,7 @@ option go_package = "bird-zpi/downloader/gen/downloader/v1;downloaderv1";
 
 service DownloaderService {
   rpc CreateDownload(CreateDownloadRequest) returns (CreateDownloadResponse);
+  rpc RetryFeature(RetryFeatureRequest) returns (RetryFeatureResponse);
 }
 
 message Point {
@@ -20,3 +21,18 @@ message CreateDownloadRequest {
 }
 
 message CreateDownloadResponse {}
+
+message RetryFeatureRequest {
+  string feature_id = 1;
+}
+
+message RetryFeatureResponse {
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    DOWNLOAD_QUEUED = 1;
+    TILING_QUEUED = 2;
+    ALREADY_COMPLETE = 3;
+  }
+
+  Action action = 1;
+}

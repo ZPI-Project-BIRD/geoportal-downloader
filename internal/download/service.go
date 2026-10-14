@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"bird-zpi/downloader/internal/database"
@@ -18,7 +20,12 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
+type FeatureStatusDatabase interface {
+	FeatureStatus(context.Context, string) (database.FeatureStatus, error)
+}
+
 type FeatureDatabase interface {
+	FeatureStatusDatabase
 	InsertFeature(context.Context, database.Feature) error
 }
 
@@ -38,11 +45,75 @@ type Service struct {
 	processor     ProcessorPublisher
 }
 
-func NewService(publisher Publisher) *Service {
+func NewService(featureDatabase FeatureDatabase, publisher RetryPublisher) *Service {
 	return &Service{
 		client:    &http.Client{},
 		publisher: publisher,
+		database:  featureDatabase,
+		processor: publisher,
 	}
+}
+
+func (s *Service) RetryFeature(ctx context.Context, featureID string) (RetryAction, error) {
+	status, err := s.database.FeatureStatus(ctx, featureID)
+	if err != nil {
+		return "", err
+	}
+	if status.Tiled {
+		return RetryAlreadyComplete, nil
+	}
+
+	layer, _, found := strings.Cut(featureID, ".")
+	if !found || layer == "" {
+		return "", fmt.Errorf("feature ID %q must include its layer prefix", featureID)
+	}
+	if status.Downloaded {
+		if err := s.processor.ProcessFeature(ctx, processor.Job{
+			FeatureID:  featureID,
+			LayerID:    layer,
+			ObjectName: fmt.Sprintf("%s.tif", featureID),
+		}); err != nil {
+			return "", fmt.Errorf("publish manual tiling retry: %w", err)
+		}
+		return RetryTilingQueued, nil
+	}
+
+	feature, err := s.findFeature(ctx, layer, featureID)
+	if err != nil {
+		return "", err
+	}
+	if err := s.publisher.DownloadFeature(ctx, feature); err != nil {
+		return "", fmt.Errorf("publish manual download retry: %w", err)
+	}
+	return RetryDownloadQueued, nil
+}
+
+func (s *Service) findFeature(ctx context.Context, layer, featureID string) (gugik.FeatureMember, error) {
+	query := url.Values{
+		"SERVICE":   {"WFS"},
+		"VERSION":   {"1.1.0"},
+		"REQUEST":   {"GetFeature"},
+		"TYPENAME":  {"gugik:" + layer},
+		"FEATUREID": {featureID},
+	}
+	requestURL := "https://mapy.geoportal.gov.pl/wss/service/PZGIK/ORTO/WFS/Skorowidze?" + query.Encode()
+
+	res, err := retryableRequest(s.client, requestURL)
+	if err != nil {
+		return gugik.FeatureMember{}, fmt.Errorf("look up feature %q: %w", featureID, err)
+	}
+	defer res.Body.Close()
+
+	var collection gugik.FeatureCollection
+	if err := xml.NewDecoder(res.Body).Decode(&collection); err != nil {
+		return gugik.FeatureMember{}, fmt.Errorf("decode feature %q lookup: %w", featureID, err)
+	}
+	for _, feature := range collection.FeatureMembers {
+		if feature.OrthophotoIndex.ID == featureID {
+			return feature, nil
+		}
+	}
+	return gugik.FeatureMember{}, fmt.Errorf("%w: %s", ErrFeatureNotFound, featureID)
 }
 
 func NewDownloadWorker(featureDatabase FeatureDatabase, objectStorage ObjectStorage, processorPublisher ProcessorPublisher) *Service {
@@ -97,7 +168,41 @@ func (s *Service) HandleDownloadFeature(ctx context.Context, delivery amqp.Deliv
 	}
 	featureID := feature.OrthophotoIndex.ID
 	log.Printf("event=feature_download_started request_id=%q message_id=%q feature_id=%q", requestID, delivery.MessageId, featureID)
+	status, err := s.database.FeatureStatus(ctx, featureID)
+	if err != nil {
+		return err
+	}
+	if status.Downloaded {
+		objectName := fmt.Sprintf("%s.tif", featureID)
+		if !status.Tiled {
+			if err := s.processor.ProcessFeature(ctx, processor.Job{
+				FeatureID:  featureID,
+				LayerID:    "SkorowidzOrtofomapy2025",
+				ObjectName: objectName,
+			}); err != nil {
+				return fmt.Errorf("publish process feature job for previously downloaded feature: %w", err)
+			}
+		}
+		if err := delivery.Ack(false); err != nil {
+			return fmt.Errorf("acknowledge skipped download feature job: %w", err)
+		}
+		log.Printf(
+			"event=feature_download_skipped request_id=%q message_id=%q feature_id=%q tiled=%t duration=%s",
+			requestID,
+			delivery.MessageId,
+			featureID,
+			status.Tiled,
+			time.Since(startedAt).Round(time.Millisecond),
+		)
+		return nil
+	}
 
+	featureRecord := database.Feature{
+		ID:          featureID,
+		ColorSpace:  feature.OrthophotoIndex.Color,
+		PixelSize:   feature.OrthophotoIndex.PixelSize,
+		DatasetDate: feature.OrthophotoIndex.DatasetDate.Time(),
+	}
 	res, err := retryableRequest(s.client, feature.OrthophotoIndex.DownloadURL)
 	if err != nil {
 		return fmt.Errorf("download feature %q: %w", featureID, err)
@@ -125,19 +230,15 @@ func (s *Service) HandleDownloadFeature(ctx context.Context, delivery amqp.Deliv
 		time.Since(uploadStartedAt).Round(time.Millisecond),
 	)
 
-	if err := s.database.InsertFeature(ctx, database.Feature{
-		ID:           featureID,
-		ColorSpace:   feature.OrthophotoIndex.Color,
-		PixelSize:    feature.OrthophotoIndex.PixelSize,
-		DatasetDate:  feature.OrthophotoIndex.DatasetDate.Time(),
-		FileSize:     fileSize,
-		DownloadedAt: time.Now().UTC(),
-	}); err != nil {
+	featureRecord.FileSize = fileSize
+	featureRecord.DownloadedAt = time.Now().UTC()
+	if err := s.database.InsertFeature(ctx, featureRecord); err != nil {
 		return err
 	}
 	log.Printf("event=feature_recorded request_id=%q feature_id=%q", requestID, featureID)
 	if err := s.processor.ProcessFeature(ctx, processor.Job{
 		FeatureID:  featureID,
+		LayerID:    "SkorowidzOrtofomapy2025",
 		ObjectName: objectName,
 	}); err != nil {
 		return fmt.Errorf("publish process feature job: %w", err)

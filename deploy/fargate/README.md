@@ -17,7 +17,7 @@ customer-managed KMS key, also grant `kms:Decrypt`.
 The services require these secrets:
 
 - `RABBITMQ_URL`: downloader API, download worker, processor worker
-- `DATABASE_URL`: download worker
+- `DATABASE_URL`: downloader API, download worker, processor worker
 - `MINIO_ACCESS_KEY`: download worker, processor worker
 - `MINIO_SECRET_KEY`: download worker, processor worker
 
