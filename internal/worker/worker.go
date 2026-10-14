@@ -4,11 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-func Run(ctx context.Context, rabbitMQURL, queue string, handle func(context.Context, []byte) error) error {
+const (
+	retryDelay  = 5 * time.Second
+	maxRetries  = int32(5)
+	retryHeader = "x-retry-count"
+)
+
+func Run(ctx context.Context, rabbitMQURL, queue string, handle func(context.Context, amqp.Delivery) error) error {
 	connection, err := amqp.Dial(rabbitMQURL)
 	if err != nil {
 		return fmt.Errorf("connect to RabbitMQ: %w", err)
@@ -34,20 +42,64 @@ func Run(ctx context.Context, rabbitMQURL, queue string, handle func(context.Con
 	}
 
 	for delivery := range deliveries {
-		if err := handle(ctx, delivery.Body); err != nil {
-			if nackErr := delivery.Nack(false, true); nackErr != nil {
-				return fmt.Errorf("requeue message from queue %q: %w", queue, nackErr)
+		if err := handle(ctx, delivery); err != nil {
+			retryCount := deliveryRetryCount(delivery)
+			if retryCount >= maxRetries {
+				log.Printf("handler for queue %q failed after %d retries; discarding message: %v", queue, retryCount, err)
+				if nackErr := delivery.Nack(false, false); nackErr != nil {
+					return fmt.Errorf("reject message from queue %q: %w", queue, nackErr)
+				}
+				continue
 			}
-			continue
-		}
 
-		if err := delivery.Ack(false); err != nil {
-			return fmt.Errorf("acknowledge message from queue %q: %w", queue, err)
+			nextRetry := retryCount + 1
+			log.Printf("handler for queue %q failed; retry %d/%d in %s: %v", queue, nextRetry, maxRetries, retryDelay, err)
+			time.Sleep(retryDelay)
+
+			if err := channel.PublishWithContext(ctx, "", queue, false, false, retryPublishing(delivery, nextRetry)); err != nil {
+				return fmt.Errorf("republish message to queue %q for retry: %w", queue, err)
+			}
+			if err := delivery.Ack(false); err != nil {
+				return fmt.Errorf("acknowledge retried message from queue %q: %w", queue, err)
+			}
 		}
 	}
 
 	if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
+
 	return nil
+}
+
+func deliveryRetryCount(delivery amqp.Delivery) int32 {
+	if count, ok := delivery.Headers[retryHeader].(int32); ok && count > 0 {
+		return count
+	}
+	return 0
+}
+
+func retryPublishing(delivery amqp.Delivery, retryCount int32) amqp.Publishing {
+	headers := make(amqp.Table, len(delivery.Headers)+1)
+	for key, value := range delivery.Headers {
+		headers[key] = value
+	}
+	headers[retryHeader] = retryCount
+
+	return amqp.Publishing{
+		Headers:         headers,
+		ContentType:     delivery.ContentType,
+		ContentEncoding: delivery.ContentEncoding,
+		DeliveryMode:    delivery.DeliveryMode,
+		Priority:        delivery.Priority,
+		CorrelationId:   delivery.CorrelationId,
+		ReplyTo:         delivery.ReplyTo,
+		Expiration:      delivery.Expiration,
+		MessageId:       delivery.MessageId,
+		Timestamp:       delivery.Timestamp,
+		Type:            delivery.Type,
+		UserId:          delivery.UserId,
+		AppId:           delivery.AppId,
+		Body:            delivery.Body,
+	}
 }

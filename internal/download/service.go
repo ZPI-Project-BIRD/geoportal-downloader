@@ -5,21 +5,50 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
+	"bird-zpi/downloader/internal/database"
 	"bird-zpi/downloader/internal/gugik"
+	"bird-zpi/downloader/internal/processor"
+
+	amqp "github.com/rabbitmq/amqp091-go"
 )
 
+type FeatureDatabase interface {
+	InsertFeature(context.Context, database.Feature) error
+}
+
+type ObjectStorage interface {
+	Upload(context.Context, string, io.Reader, int64, string) (int64, error)
+}
+
+type ProcessorPublisher interface {
+	ProcessFeature(context.Context, processor.Job) error
+}
+
 type Service struct {
-	client    *http.Client
-	publisher Publisher
+	client        *http.Client
+	publisher     Publisher
+	database      FeatureDatabase
+	objectStorage ObjectStorage
+	processor     ProcessorPublisher
 }
 
 func NewService(publisher Publisher) *Service {
 	return &Service{
 		client:    &http.Client{},
 		publisher: publisher,
+	}
+}
+
+func NewDownloadWorker(featureDatabase FeatureDatabase, objectStorage ObjectStorage, processorPublisher ProcessorPublisher) *Service {
+	return &Service{
+		client:        &http.Client{},
+		database:      featureDatabase,
+		objectStorage: objectStorage,
+		processor:     processorPublisher,
 	}
 }
 
@@ -47,13 +76,51 @@ func (s *Service) CreateDownload(ctx context.Context, req CreateRequest) error {
 	return nil
 }
 
-func (s *Service) HandleDownloadFeature(ctx context.Context, body []byte) error {
+func (s *Service) HandleDownloadFeature(ctx context.Context, delivery amqp.Delivery) error {
 	var feature gugik.FeatureMember
-	if err := json.Unmarshal(body, &feature); err != nil {
+	if err := json.Unmarshal(delivery.Body, &feature); err != nil {
 		return fmt.Errorf("decode download feature job: %w", err)
 	}
 
-	// Download feature processing goes here.
+	res, err := retryableRequest(s.client, feature.OrthophotoIndex.DownloadURL)
+	if err != nil {
+		return fmt.Errorf("download feature %q: %w", feature.OrthophotoIndex.ID, err)
+	}
+	defer res.Body.Close()
+
+	objectName := fmt.Sprintf("%s.tif", feature.OrthophotoIndex.ID)
+	fileSize, err := s.objectStorage.Upload(
+		ctx,
+		objectName,
+		res.Body,
+		res.ContentLength,
+		res.Header.Get("Content-Type"),
+	)
+	if err != nil {
+		return fmt.Errorf("store downloaded feature %q: %w", feature.OrthophotoIndex.ID, err)
+	}
+
+	if err := s.database.InsertFeature(ctx, database.Feature{
+		ID:           feature.OrthophotoIndex.ID,
+		ColorSpace:   feature.OrthophotoIndex.Color,
+		PixelSize:    feature.OrthophotoIndex.PixelSize,
+		DatasetDate:  feature.OrthophotoIndex.DatasetDate.Time(),
+		FileSize:     fileSize,
+		DownloadedAt: time.Now().UTC(),
+	}); err != nil {
+		return err
+	}
+	if err := s.processor.ProcessFeature(ctx, processor.Job{
+		FeatureID:  feature.OrthophotoIndex.ID,
+		ObjectName: objectName,
+	}); err != nil {
+		return fmt.Errorf("publish process feature job: %w", err)
+	}
+
+	if err := delivery.Ack(false); err != nil {
+		return fmt.Errorf("acknowledge download feature job: %w", err)
+	}
+
 	return nil
 }
 

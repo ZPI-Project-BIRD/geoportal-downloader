@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -12,6 +11,7 @@ import (
 	"syscall"
 
 	downloaderv1 "bird-zpi/downloader/gen/downloader/v1"
+	"bird-zpi/downloader/internal/config"
 	"bird-zpi/downloader/internal/download"
 	"bird-zpi/downloader/internal/messaging/rabbitmq"
 	grpcapi "bird-zpi/downloader/internal/transport/grpc"
@@ -54,27 +54,32 @@ func run(ctx context.Context, address, rabbitMQURL string) error {
 	return nil
 }
 
-func printUsage(message string) {
-	fmt.Fprintf(flag.CommandLine.Output(), "%s\n\n", message)
-	fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [options]\n\n", os.Args[0])
-	flag.PrintDefaults()
-	os.Exit(1)
+type configValues struct {
+	Address     string `envconfig:"GRPC_ADDRESS" default:"0.0.0.0:50051"`
+	RabbitMQURL string `envconfig:"RABBITMQ_URL" required:"true"`
+}
+
+func loadConfig() (configValues, error) {
+	var values configValues
+	if err := config.Load(&values); err != nil {
+		return configValues{}, err
+	}
+	if _, _, err := net.SplitHostPort(values.Address); err != nil {
+		return configValues{}, fmt.Errorf("invalid GRPC_ADDRESS %q: %w", values.Address, err)
+	}
+	return values, nil
 }
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	address := flag.String("address", "127.0.0.1:50051", "ip address with port that the gRPC server will listen on")
-	rabbitMQURL := flag.String("rabbitmq-url", rabbitmq.DefaultURL, "RabbitMQ connection URL")
-	flag.Parse()
-
-	_, _, err := net.SplitHostPort(*address)
+	values, err := loadConfig()
 	if err != nil {
-		printUsage("malformed --address provided")
+		log.Fatal(err)
 	}
 
-	if err := run(ctx, *address, *rabbitMQURL); err != nil {
+	if err := run(ctx, values.Address, values.RabbitMQURL); err != nil {
 		log.Fatal(err)
 	}
 }

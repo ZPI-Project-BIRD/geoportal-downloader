@@ -1,6 +1,7 @@
 package gugik_test
 
 import (
+	"encoding/json"
 	"encoding/xml"
 	"testing"
 	"time"
@@ -76,6 +77,47 @@ func TestDecodeFeatureCollection(t *testing.T) {
 	}
 	if got, want := len(feature.Geometry.Polygon.Exterior.LinearRing.Positions.Ordinates), 6; got != want {
 		t.Errorf("ordinate count = %d, want %d", got, want)
+	}
+}
+
+func TestFeatureMemberJSONRoundTrip(t *testing.T) {
+	want := gugik.FeatureMember{
+		OrthophotoIndex: gugik.OrthophotoIndex{
+			ID: "feature-1",
+			BoundedBy: gugik.BoundedBy{Envelope: gugik.Envelope{
+				LowerCorner: gugik.Coordinate{498689.93, 497872.28},
+				UpperCorner: gugik.Coordinate{501007.05, 500000},
+			}},
+			UpdateDate:  gugik.Date(time.Date(2025, time.April, 4, 0, 0, 0, 0, time.UTC)),
+			DatasetDate: gugik.Date(time.Date(2026, time.March, 20, 0, 0, 0, 0, time.UTC)),
+		},
+	}
+
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("encode feature member: %v", err)
+	}
+
+	var got gugik.FeatureMember
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("decode feature member: %v", err)
+	}
+
+	if !coordinatesEqual(got.OrthophotoIndex.BoundedBy.Envelope.LowerCorner, want.OrthophotoIndex.BoundedBy.Envelope.LowerCorner) {
+		t.Errorf("lower corner = %v, want %v", got.OrthophotoIndex.BoundedBy.Envelope.LowerCorner, want.OrthophotoIndex.BoundedBy.Envelope.LowerCorner)
+	}
+	if got.OrthophotoIndex.UpdateDate.String() != want.OrthophotoIndex.UpdateDate.String() {
+		t.Errorf("update date = %s, want %s", got.OrthophotoIndex.UpdateDate, want.OrthophotoIndex.UpdateDate)
+	}
+}
+
+func TestDateUnmarshalLegacyEmptyObject(t *testing.T) {
+	var date gugik.Date
+	if err := json.Unmarshal([]byte(`{}`), &date); err != nil {
+		t.Fatalf("decode legacy date: %v", err)
+	}
+	if !date.Time().IsZero() {
+		t.Errorf("legacy date = %s, want zero value", date)
 	}
 }
 
