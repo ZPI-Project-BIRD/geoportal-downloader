@@ -58,7 +58,7 @@ func run(ctx context.Context, cfg configValues) error {
 	}
 	defer processorPublisher.Close()
 
-	service := download.NewDownloadWorker(featureDatabase, objectStorage, processorPublisher)
+	service := download.NewDownloadWorker(featureDatabase, objectStorage, processorPublisher, processorPublisher)
 	log.Print("download worker started")
 	return worker.Run(
 		ctx,

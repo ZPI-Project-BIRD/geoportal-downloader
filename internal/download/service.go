@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"bird-zpi/downloader/internal/database"
+	"bird-zpi/downloader/internal/detection"
 	"bird-zpi/downloader/internal/gugik"
 	"bird-zpi/downloader/internal/processor"
 	"bird-zpi/downloader/internal/trace"
@@ -37,12 +38,17 @@ type ProcessorPublisher interface {
 	ProcessFeature(context.Context, processor.Job) error
 }
 
+type DetectionPublisher interface {
+	DetectFeature(context.Context, detection.Job) error
+}
+
 type Service struct {
 	client        *http.Client
 	publisher     Publisher
 	database      FeatureDatabase
 	objectStorage ObjectStorage
 	processor     ProcessorPublisher
+	detector      DetectionPublisher
 }
 
 func NewService(featureDatabase FeatureDatabase, publisher RetryPublisher) *Service {
@@ -54,7 +60,7 @@ func NewService(featureDatabase FeatureDatabase, publisher RetryPublisher) *Serv
 	}
 }
 
-func (s *Service) RetryFeature(ctx context.Context, featureID string) (RetryAction, error) {
+func (s *Service) RetryFeature(ctx context.Context, projectID, featureID string) (RetryAction, error) {
 	status, err := s.database.FeatureStatus(ctx, featureID)
 	if err != nil {
 		return "", err
@@ -69,6 +75,7 @@ func (s *Service) RetryFeature(ctx context.Context, featureID string) (RetryActi
 	}
 	if status.Downloaded {
 		if err := s.processor.ProcessFeature(ctx, processor.Job{
+			ProjectID:  projectID,
 			FeatureID:  featureID,
 			LayerID:    layer,
 			ObjectName: fmt.Sprintf("%s.tif", featureID),
@@ -82,7 +89,11 @@ func (s *Service) RetryFeature(ctx context.Context, featureID string) (RetryActi
 	if err != nil {
 		return "", err
 	}
-	if err := s.publisher.DownloadFeature(ctx, feature); err != nil {
+	if err := s.publisher.DownloadFeature(ctx, Job{
+		ProjectID: projectID,
+		LayerID:   layer,
+		Feature:   feature,
+	}); err != nil {
 		return "", fmt.Errorf("publish manual download retry: %w", err)
 	}
 	return RetryDownloadQueued, nil
@@ -116,12 +127,18 @@ func (s *Service) findFeature(ctx context.Context, layer, featureID string) (gug
 	return gugik.FeatureMember{}, fmt.Errorf("%w: %s", ErrFeatureNotFound, featureID)
 }
 
-func NewDownloadWorker(featureDatabase FeatureDatabase, objectStorage ObjectStorage, processorPublisher ProcessorPublisher) *Service {
+func NewDownloadWorker(
+	featureDatabase FeatureDatabase,
+	objectStorage ObjectStorage,
+	processorPublisher ProcessorPublisher,
+	detectionPublisher DetectionPublisher,
+) *Service {
 	return &Service{
 		client:        &http.Client{},
 		database:      featureDatabase,
 		objectStorage: objectStorage,
 		processor:     processorPublisher,
+		detector:      detectionPublisher,
 	}
 }
 
@@ -131,7 +148,7 @@ func (s *Service) CreateDownload(ctx context.Context, req CreateRequest) error {
 	url := fmt.Sprintf("https://mapy.geoportal.gov.pl/wss/service/PZGIK/ORTO/WFS/Skorowidze?SERVICE=WFS&VERSION=1.1.0&REQUEST=GetFeature&TYPENAME=gugik:SkorowidzOrtofomapy2025&SRSNAME=EPSG:2180&BBOX=%s", bbox)
 
 	startedAt := time.Now()
-	log.Printf("event=feature_discovery_started request_id=%q layer=%q bbox=%q", requestID, req.Layer, bbox)
+	log.Printf("event=feature_discovery_started request_id=%q project_id=%q layer=%q bbox=%q", requestID, req.ProjectID, req.Layer, bbox)
 	res, err := retryableRequest(s.client, url)
 	if err != nil {
 		return err
@@ -150,7 +167,11 @@ func (s *Service) CreateDownload(ctx context.Context, req CreateRequest) error {
 	)
 
 	for _, feature := range collection.FeatureMembers {
-		if err := s.publisher.DownloadFeature(ctx, feature); err != nil {
+		if err := s.publisher.DownloadFeature(ctx, Job{
+			ProjectID: req.ProjectID,
+			LayerID:   req.Layer,
+			Feature:   feature,
+		}); err != nil {
 			return err
 		}
 	}
@@ -162,22 +183,30 @@ func (s *Service) CreateDownload(ctx context.Context, req CreateRequest) error {
 func (s *Service) HandleDownloadFeature(ctx context.Context, delivery amqp.Delivery) error {
 	startedAt := time.Now()
 	requestID := trace.ID(ctx)
-	var feature gugik.FeatureMember
-	if err := json.Unmarshal(delivery.Body, &feature); err != nil {
+	var job Job
+	if err := json.Unmarshal(delivery.Body, &job); err != nil {
 		return fmt.Errorf("decode download feature job: %w", err)
 	}
+	if job.ProjectID == "" || job.LayerID == "" || job.Feature.OrthophotoIndex.ID == "" {
+		return fmt.Errorf("download feature job requires projectId, layerId, and feature")
+	}
+	feature := job.Feature
 	featureID := feature.OrthophotoIndex.ID
-	log.Printf("event=feature_download_started request_id=%q message_id=%q feature_id=%q", requestID, delivery.MessageId, featureID)
+	log.Printf("event=feature_download_started request_id=%q message_id=%q project_id=%q feature_id=%q", requestID, delivery.MessageId, job.ProjectID, featureID)
 	status, err := s.database.FeatureStatus(ctx, featureID)
 	if err != nil {
 		return err
 	}
 	if status.Downloaded {
 		objectName := fmt.Sprintf("%s.tif", featureID)
+		if err := s.queueDetection(ctx, job.ProjectID, job.LayerID, featureID, objectName); err != nil {
+			return err
+		}
 		if !status.Tiled {
 			if err := s.processor.ProcessFeature(ctx, processor.Job{
+				ProjectID:  job.ProjectID,
 				FeatureID:  featureID,
-				LayerID:    "SkorowidzOrtofomapy2025",
+				LayerID:    job.LayerID,
 				ObjectName: objectName,
 			}); err != nil {
 				return fmt.Errorf("publish process feature job for previously downloaded feature: %w", err)
@@ -236,9 +265,13 @@ func (s *Service) HandleDownloadFeature(ctx context.Context, delivery amqp.Deliv
 		return err
 	}
 	log.Printf("event=feature_recorded request_id=%q feature_id=%q", requestID, featureID)
+	if err := s.queueDetection(ctx, job.ProjectID, job.LayerID, featureID, objectName); err != nil {
+		return err
+	}
 	if err := s.processor.ProcessFeature(ctx, processor.Job{
+		ProjectID:  job.ProjectID,
 		FeatureID:  featureID,
-		LayerID:    "SkorowidzOrtofomapy2025",
+		LayerID:    job.LayerID,
 		ObjectName: objectName,
 	}); err != nil {
 		return fmt.Errorf("publish process feature job: %w", err)
@@ -257,6 +290,25 @@ func (s *Service) HandleDownloadFeature(ctx context.Context, delivery amqp.Deliv
 		time.Since(startedAt).Round(time.Millisecond),
 	)
 
+	return nil
+}
+
+func (s *Service) queueDetection(ctx context.Context, projectID, layerID, featureID, objectName string) error {
+	if err := s.detector.DetectFeature(ctx, detection.Job{
+		ProjectID:  projectID,
+		FeatureID:  featureID,
+		LayerID:    layerID,
+		ObjectName: objectName,
+	}); err != nil {
+		return fmt.Errorf("publish detection job: %w", err)
+	}
+	log.Printf(
+		"event=detection_job_queued request_id=%q project_id=%q feature_id=%q object_name=%q",
+		trace.ID(ctx),
+		projectID,
+		featureID,
+		objectName,
+	)
 	return nil
 }
 

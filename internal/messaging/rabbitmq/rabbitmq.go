@@ -7,8 +7,8 @@ import (
 	"log"
 	"time"
 
+	"bird-zpi/downloader/internal/detection"
 	"bird-zpi/downloader/internal/download"
-	"bird-zpi/downloader/internal/gugik"
 	"bird-zpi/downloader/internal/processor"
 	"bird-zpi/downloader/internal/trace"
 
@@ -27,8 +27,8 @@ func NewPublisher(url string) (*Publisher, error) {
 	return &Publisher{connection: connection}, nil
 }
 
-func (p *Publisher) DownloadFeature(ctx context.Context, feature gugik.FeatureMember) error {
-	body, err := json.Marshal(feature)
+func (p *Publisher) DownloadFeature(ctx context.Context, job download.Job) error {
+	body, err := json.Marshal(job)
 	if err != nil {
 		return fmt.Errorf("encode download feature job: %w", err)
 	}
@@ -41,6 +41,14 @@ func (p *Publisher) ProcessFeature(ctx context.Context, job processor.Job) error
 		return fmt.Errorf("encode process feature job: %w", err)
 	}
 	return p.publish(ctx, processor.Queue, body)
+}
+
+func (p *Publisher) DetectFeature(ctx context.Context, job detection.Job) error {
+	body, err := json.Marshal(job)
+	if err != nil {
+		return fmt.Errorf("encode detection job: %w", err)
+	}
+	return p.publish(ctx, detection.Queue, body)
 }
 
 func (p *Publisher) publish(ctx context.Context, queue string, body []byte) error {

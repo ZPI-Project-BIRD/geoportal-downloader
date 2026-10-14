@@ -11,6 +11,7 @@ import (
 	"bird-zpi/downloader/internal/download"
 	"bird-zpi/downloader/internal/trace"
 
+	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -29,15 +30,17 @@ func (s *Server) RetryFeature(ctx context.Context, request *downloaderv1.RetryFe
 	requestID := trace.NewID()
 	ctx = trace.WithID(ctx, requestID)
 	featureID := request.GetFeatureId()
-	log.Printf("event=grpc_request_started method=RetryFeature request_id=%q feature_id=%q", requestID, featureID)
+	projectID := request.GetProjectId()
+	log.Printf("event=grpc_request_started method=RetryFeature request_id=%q project_id=%q feature_id=%q", requestID, projectID, featureID)
 	defer func() {
 		result := "succeeded"
 		if err != nil {
 			result = "failed"
 		}
 		log.Printf(
-			"event=grpc_request_completed method=RetryFeature request_id=%q feature_id=%q status=%q duration=%s error=%q",
+			"event=grpc_request_completed method=RetryFeature request_id=%q project_id=%q feature_id=%q status=%q duration=%s error=%q",
 			requestID,
+			projectID,
 			featureID,
 			result,
 			time.Since(startedAt).Round(time.Millisecond),
@@ -48,7 +51,10 @@ func (s *Server) RetryFeature(ctx context.Context, request *downloaderv1.RetryFe
 	if featureID == "" {
 		return nil, status.Error(codes.InvalidArgument, "feature_id is required")
 	}
-	action, err := s.service.RetryFeature(ctx, featureID)
+	if err := validateProjectID(projectID); err != nil {
+		return nil, err
+	}
+	action, err := s.service.RetryFeature(ctx, projectID, featureID)
 	if err != nil {
 		if errors.Is(err, download.ErrFeatureNotFound) {
 			return nil, status.Error(codes.NotFound, err.Error())
@@ -73,8 +79,9 @@ func (s *Server) CreateDownload(ctx context.Context, request *downloaderv1.Creat
 	requestID := trace.NewID()
 	ctx = trace.WithID(ctx, requestID)
 	log.Printf(
-		"event=grpc_request_started method=CreateDownload request_id=%q layer=%q top_left_x=%f top_left_y=%f bottom_right_x=%f bottom_right_y=%f",
+		"event=grpc_request_started method=CreateDownload request_id=%q project_id=%q layer=%q top_left_x=%f top_left_y=%f bottom_right_x=%f bottom_right_y=%f",
 		requestID,
+		request.GetProjectId(),
 		request.GetLayer(),
 		request.GetTopLeft().GetX(),
 		request.GetTopLeft().GetY(),
@@ -94,6 +101,9 @@ func (s *Server) CreateDownload(ctx context.Context, request *downloaderv1.Creat
 			err,
 		)
 	}()
+	if err := validateProjectID(request.GetProjectId()); err != nil {
+		return nil, err
+	}
 
 	topLeftX, topLeftY, err := internal.Convert4326to2180(request.GetTopLeft().GetX(), request.GetTopLeft().GetY())
 	if err != nil {
@@ -106,7 +116,8 @@ func (s *Server) CreateDownload(ctx context.Context, request *downloaderv1.Creat
 	}
 
 	if err := s.service.CreateDownload(ctx, download.CreateRequest{
-		Layer: request.GetLayer(),
+		ProjectID: request.GetProjectId(),
+		Layer:     request.GetLayer(),
 		TopLeft: download.Point{
 			X: topLeftX,
 			Y: topLeftY,
@@ -120,4 +131,14 @@ func (s *Server) CreateDownload(ctx context.Context, request *downloaderv1.Creat
 	}
 
 	return &downloaderv1.CreateDownloadResponse{}, nil
+}
+
+func validateProjectID(projectID string) error {
+	if projectID == "" {
+		return status.Error(codes.InvalidArgument, "project_id is required")
+	}
+	if _, err := uuid.Parse(projectID); err != nil {
+		return status.Error(codes.InvalidArgument, "project_id must be a valid UUID")
+	}
+	return nil
 }

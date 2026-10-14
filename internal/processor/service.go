@@ -52,13 +52,14 @@ func (s *Service) HandleProcessFeature(ctx context.Context, delivery amqp.Delive
 	if err := json.Unmarshal(delivery.Body, &job); err != nil {
 		return fmt.Errorf("decode process feature job: %w", err)
 	}
-	if job.FeatureID == "" || job.ObjectName == "" {
-		return fmt.Errorf("process feature job requires featureId and objectName")
+	if job.ProjectID == "" || job.FeatureID == "" || job.LayerID == "" || job.ObjectName == "" {
+		return fmt.Errorf("process feature job requires projectId, featureId, layerId, and objectName")
 	}
 	log.Printf(
-		"event=feature_processing_started request_id=%q message_id=%q feature_id=%q object_name=%q",
+		"event=feature_processing_started request_id=%q message_id=%q project_id=%q feature_id=%q object_name=%q",
 		requestID,
 		delivery.MessageId,
+		job.ProjectID,
 		job.FeatureID,
 		job.ObjectName,
 	)
