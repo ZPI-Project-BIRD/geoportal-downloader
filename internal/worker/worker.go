@@ -7,6 +7,8 @@ import (
 	"log"
 	"time"
 
+	"bird-zpi/downloader/internal/trace"
+
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -42,10 +44,34 @@ func Run(ctx context.Context, rabbitMQURL, queue string, handle func(context.Con
 	}
 
 	for delivery := range deliveries {
-		if err := handle(ctx, delivery); err != nil {
-			retryCount := deliveryRetryCount(delivery)
+		startedAt := time.Now()
+		if delivery.CorrelationId == "" {
+			delivery.CorrelationId = trace.NewID()
+		}
+		if delivery.MessageId == "" {
+			delivery.MessageId = trace.NewID()
+		}
+		requestID := delivery.CorrelationId
+		retryCount := deliveryRetryCount(delivery)
+		log.Printf(
+			"event=message_received request_id=%q message_id=%q queue=%q retry=%d",
+			requestID,
+			delivery.MessageId,
+			queue,
+			retryCount,
+		)
+		handlerContext := trace.WithID(ctx, requestID)
+		if err := handle(handlerContext, delivery); err != nil {
 			if retryCount >= maxRetries {
-				log.Printf("handler for queue %q failed after %d retries; discarding message: %v", queue, retryCount, err)
+				log.Printf(
+					"event=message_discarded request_id=%q message_id=%q queue=%q retry=%d duration=%s error=%q",
+					requestID,
+					delivery.MessageId,
+					queue,
+					retryCount,
+					time.Since(startedAt).Round(time.Millisecond),
+					err,
+				)
 				if nackErr := delivery.Nack(false, false); nackErr != nil {
 					return fmt.Errorf("reject message from queue %q: %w", queue, nackErr)
 				}
@@ -53,7 +79,17 @@ func Run(ctx context.Context, rabbitMQURL, queue string, handle func(context.Con
 			}
 
 			nextRetry := retryCount + 1
-			log.Printf("handler for queue %q failed; retry %d/%d in %s: %v", queue, nextRetry, maxRetries, retryDelay, err)
+			log.Printf(
+				"event=message_retry_scheduled request_id=%q message_id=%q queue=%q retry=%d max_retries=%d delay=%s duration=%s error=%q",
+				requestID,
+				delivery.MessageId,
+				queue,
+				nextRetry,
+				maxRetries,
+				retryDelay,
+				time.Since(startedAt).Round(time.Millisecond),
+				err,
+			)
 			time.Sleep(retryDelay)
 
 			if err := channel.PublishWithContext(ctx, "", queue, false, false, retryPublishing(delivery, nextRetry)); err != nil {
@@ -62,7 +98,16 @@ func Run(ctx context.Context, rabbitMQURL, queue string, handle func(context.Con
 			if err := delivery.Ack(false); err != nil {
 				return fmt.Errorf("acknowledge retried message from queue %q: %w", queue, err)
 			}
+			continue
 		}
+		log.Printf(
+			"event=message_completed request_id=%q message_id=%q queue=%q retry=%d duration=%s",
+			requestID,
+			delivery.MessageId,
+			queue,
+			retryCount,
+			time.Since(startedAt).Round(time.Millisecond),
+		)
 	}
 
 	if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {
