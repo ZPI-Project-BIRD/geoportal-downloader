@@ -130,6 +130,7 @@ type CreateDownloadRequest struct {
 	Layer         string                 `protobuf:"bytes,1,opt,name=layer,proto3" json:"layer,omitempty"`
 	TopLeft       *Point                 `protobuf:"bytes,2,opt,name=top_left,json=topLeft,proto3" json:"top_left,omitempty"`
 	BottomRight   *Point                 `protobuf:"bytes,3,opt,name=bottom_right,json=bottomRight,proto3" json:"bottom_right,omitempty"`
+	ProjectId     string                 `protobuf:"bytes,4,opt,name=project_id,json=projectId,proto3" json:"project_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -185,6 +186,13 @@ func (x *CreateDownloadRequest) GetBottomRight() *Point {
 	return nil
 }
 
+func (x *CreateDownloadRequest) GetProjectId() string {
+	if x != nil {
+		return x.ProjectId
+	}
+	return ""
+}
+
 type CreateDownloadResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -224,6 +232,7 @@ func (*CreateDownloadResponse) Descriptor() ([]byte, []int) {
 type RetryFeatureRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	FeatureId     string                 `protobuf:"bytes,1,opt,name=feature_id,json=featureId,proto3" json:"feature_id,omitempty"`
+	ProjectId     string                 `protobuf:"bytes,2,opt,name=project_id,json=projectId,proto3" json:"project_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -261,6 +270,13 @@ func (*RetryFeatureRequest) Descriptor() ([]byte, []int) {
 func (x *RetryFeatureRequest) GetFeatureId() string {
 	if x != nil {
 		return x.FeatureId
+	}
+	return ""
+}
+
+func (x *RetryFeatureRequest) GetProjectId() string {
+	if x != nil {
+		return x.ProjectId
 	}
 	return ""
 }
@@ -316,15 +332,19 @@ const file_api_downloader_v1_downloader_proto_rawDesc = "" +
 	"\"api/downloader/v1/downloader.proto\x12\rdownloader.v1\"#\n" +
 	"\x05Point\x12\f\n" +
 	"\x01x\x18\x01 \x01(\x01R\x01x\x12\f\n" +
-	"\x01y\x18\x02 \x01(\x01R\x01y\"\x97\x01\n" +
+	"\x01y\x18\x02 \x01(\x01R\x01y\"\xb6\x01\n" +
 	"\x15CreateDownloadRequest\x12\x14\n" +
 	"\x05layer\x18\x01 \x01(\tR\x05layer\x12/\n" +
 	"\btop_left\x18\x02 \x01(\v2\x14.downloader.v1.PointR\atopLeft\x127\n" +
-	"\fbottom_right\x18\x03 \x01(\v2\x14.downloader.v1.PointR\vbottomRight\"\x18\n" +
-	"\x16CreateDownloadResponse\"4\n" +
+	"\fbottom_right\x18\x03 \x01(\v2\x14.downloader.v1.PointR\vbottomRight\x12\x1d\n" +
+	"\n" +
+	"project_id\x18\x04 \x01(\tR\tprojectId\"\x18\n" +
+	"\x16CreateDownloadResponse\"S\n" +
 	"\x13RetryFeatureRequest\x12\x1d\n" +
 	"\n" +
-	"feature_id\x18\x01 \x01(\tR\tfeatureId\"\xba\x01\n" +
+	"feature_id\x18\x01 \x01(\tR\tfeatureId\x12\x1d\n" +
+	"\n" +
+	"project_id\x18\x02 \x01(\tR\tprojectId\"\xba\x01\n" +
 	"\x14RetryFeatureResponse\x12B\n" +
 	"\x06action\x18\x01 \x01(\x0e2*.downloader.v1.RetryFeatureResponse.ActionR\x06action\"^\n" +
 	"\x06Action\x12\x16\n" +

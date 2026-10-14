@@ -18,12 +18,14 @@ message CreateDownloadRequest {
   string layer = 1;
   Point top_left = 2;
   Point bottom_right = 3;
+  string project_id = 4;
 }
 
 message CreateDownloadResponse {}
 
 message RetryFeatureRequest {
   string feature_id = 1;
+  string project_id = 2;
 }
 
 message RetryFeatureResponse {

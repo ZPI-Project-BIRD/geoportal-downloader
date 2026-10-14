@@ -18,6 +18,7 @@ type Point struct {
 }
 
 type CreateRequest struct {
+	ProjectID   string
 	Layer       string
 	TopLeft     Point
 	BottomRight Point
