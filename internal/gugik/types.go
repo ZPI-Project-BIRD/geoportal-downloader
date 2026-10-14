@@ -3,6 +3,8 @@
 package gugik
 
 import (
+	"bytes"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"strconv"
@@ -90,6 +92,23 @@ type PositionList struct {
 // width is given by PositionList.Dimension.
 type Coordinate []float64
 
+func (c *Coordinate) UnmarshalJSON(data []byte) error {
+	if len(data) > 0 && data[0] == '"' {
+		var text string
+		if err := json.Unmarshal(data, &text); err != nil {
+			return fmt.Errorf("decode coordinate string: %w", err)
+		}
+		return c.UnmarshalText([]byte(text))
+	}
+
+	var coordinates []float64
+	if err := json.Unmarshal(data, &coordinates); err != nil {
+		return fmt.Errorf("decode coordinate array: %w", err)
+	}
+	*c = coordinates
+	return nil
+}
+
 func (c *Coordinate) UnmarshalText(text []byte) error {
 	fields := strings.Fields(string(text))
 	coordinates := make(Coordinate, len(fields))
@@ -106,6 +125,24 @@ func (c *Coordinate) UnmarshalText(text []byte) error {
 
 // Date represents the date-only values used by the GUGiK service.
 type Date time.Time
+
+func (d Date) MarshalJSON() ([]byte, error) {
+	return json.Marshal(d.String())
+}
+
+func (d *Date) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if bytes.Equal(data, []byte("{}")) || bytes.Equal(data, []byte("null")) {
+		*d = Date(time.Time{})
+		return nil
+	}
+
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("decode GUGiK date: %w", err)
+	}
+	return d.UnmarshalText([]byte(value))
+}
 
 func (d *Date) UnmarshalText(text []byte) error {
 	value, err := time.Parse(time.DateOnly, string(text))
