@@ -12,6 +12,7 @@ import (
 
 	downloaderv1 "bird-zpi/downloader/gen/downloader/v1"
 	"bird-zpi/downloader/internal/config"
+	"bird-zpi/downloader/internal/database"
 	"bird-zpi/downloader/internal/download"
 	"bird-zpi/downloader/internal/messaging/rabbitmq"
 	grpcapi "bird-zpi/downloader/internal/transport/grpc"
@@ -20,19 +21,25 @@ import (
 	"google.golang.org/grpc/reflection"
 )
 
-func newGRPCServer(publisher download.Publisher) *grpc.Server {
+func newGRPCServer(featureDatabase download.FeatureDatabase, publisher download.RetryPublisher) *grpc.Server {
 	grpcServer := grpc.NewServer()
-	downloaderv1.RegisterDownloaderServiceServer(grpcServer, grpcapi.NewServer(publisher))
+	downloaderv1.RegisterDownloaderServiceServer(grpcServer, grpcapi.NewServer(featureDatabase, publisher))
 	reflection.Register(grpcServer)
 	return grpcServer
 }
 
-func run(ctx context.Context, address, rabbitMQURL string) error {
+func run(ctx context.Context, address, rabbitMQURL, databaseURL string) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", address, err)
 	}
 	defer listener.Close()
+
+	featureDatabase, err := database.New(ctx, databaseURL)
+	if err != nil {
+		return err
+	}
+	defer featureDatabase.Close()
 
 	jobPublisher, err := rabbitmq.NewPublisher(rabbitMQURL)
 	if err != nil {
@@ -40,7 +47,7 @@ func run(ctx context.Context, address, rabbitMQURL string) error {
 	}
 	defer jobPublisher.Close()
 
-	grpcServer := newGRPCServer(jobPublisher)
+	grpcServer := newGRPCServer(featureDatabase, jobPublisher)
 
 	go func() {
 		<-ctx.Done()
@@ -57,6 +64,7 @@ func run(ctx context.Context, address, rabbitMQURL string) error {
 type configValues struct {
 	Address     string `envconfig:"GRPC_ADDRESS" default:"0.0.0.0:50051"`
 	RabbitMQURL string `envconfig:"RABBITMQ_URL" required:"true"`
+	DatabaseURL string `envconfig:"DATABASE_URL" required:"true"`
 }
 
 func loadConfig() (configValues, error) {
@@ -79,7 +87,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if err := run(ctx, values.Address, values.RabbitMQURL); err != nil {
+	if err := run(ctx, values.Address, values.RabbitMQURL, values.DatabaseURL); err != nil {
 		log.Fatal(err)
 	}
 }
