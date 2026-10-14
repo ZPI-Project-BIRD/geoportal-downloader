@@ -6,10 +6,14 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"bird-zpi/downloader/internal/trace"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -34,6 +38,8 @@ func NewService(sourceStorage, tileStorage ObjectStorage, tiler Tiler) *Service 
 }
 
 func (s *Service) HandleProcessFeature(ctx context.Context, delivery amqp.Delivery) error {
+	startedAt := time.Now()
+	requestID := trace.ID(ctx)
 	var job Job
 	if err := json.Unmarshal(delivery.Body, &job); err != nil {
 		return fmt.Errorf("decode process feature job: %w", err)
@@ -41,6 +47,13 @@ func (s *Service) HandleProcessFeature(ctx context.Context, delivery amqp.Delive
 	if job.FeatureID == "" || job.ObjectName == "" {
 		return fmt.Errorf("process feature job requires featureId and objectName")
 	}
+	log.Printf(
+		"event=feature_processing_started request_id=%q message_id=%q feature_id=%q object_name=%q",
+		requestID,
+		delivery.MessageId,
+		job.FeatureID,
+		job.ObjectName,
+	)
 
 	workingDirectory, err := os.MkdirTemp("", "zpi-processor-*")
 	if err != nil {
@@ -53,7 +66,8 @@ func (s *Service) HandleProcessFeature(ctx context.Context, delivery amqp.Delive
 	if err != nil {
 		return fmt.Errorf("create temporary GeoTIFF: %w", err)
 	}
-	_, downloadErr := s.sourceStorage.Download(ctx, job.ObjectName, input)
+	downloadStartedAt := time.Now()
+	downloadedBytes, downloadErr := s.sourceStorage.Download(ctx, job.ObjectName, input)
 	closeErr := input.Close()
 	if downloadErr != nil {
 		return downloadErr
@@ -61,12 +75,28 @@ func (s *Service) HandleProcessFeature(ctx context.Context, delivery amqp.Delive
 	if closeErr != nil {
 		return fmt.Errorf("close temporary GeoTIFF: %w", closeErr)
 	}
+	log.Printf(
+		"event=source_downloaded request_id=%q feature_id=%q object_name=%q bytes=%d duration=%s",
+		requestID,
+		job.FeatureID,
+		job.ObjectName,
+		downloadedBytes,
+		time.Since(downloadStartedAt).Round(time.Millisecond),
+	)
 
 	tilesDirectory := filepath.Join(workingDirectory, "tiles")
+	tilingStartedAt := time.Now()
 	if err := s.tiler.Tile(ctx, inputPath, tilesDirectory); err != nil {
 		return fmt.Errorf("tile feature %q: %w", job.FeatureID, err)
 	}
+	log.Printf(
+		"event=feature_tiled request_id=%q feature_id=%q duration=%s",
+		requestID,
+		job.FeatureID,
+		time.Since(tilingStartedAt).Round(time.Millisecond),
+	)
 
+	uploadStartedAt := time.Now()
 	tileCount, err := s.uploadTiles(ctx, job.FeatureID, tilesDirectory)
 	if err != nil {
 		return err
@@ -74,10 +104,26 @@ func (s *Service) HandleProcessFeature(ctx context.Context, delivery amqp.Delive
 	if tileCount == 0 {
 		return fmt.Errorf("tiling feature %q produced no PNG tiles", job.FeatureID)
 	}
+	log.Printf(
+		"event=tiles_uploaded request_id=%q feature_id=%q tile_count=%d duration=%s",
+		requestID,
+		job.FeatureID,
+		tileCount,
+		time.Since(uploadStartedAt).Round(time.Millisecond),
+	)
 
 	if err := delivery.Ack(false); err != nil {
 		return fmt.Errorf("acknowledge process feature job: %w", err)
 	}
+	log.Printf(
+		"event=feature_processing_completed request_id=%q message_id=%q feature_id=%q tile_count=%d duration=%s",
+		requestID,
+		delivery.MessageId,
+		job.FeatureID,
+		tileCount,
+		time.Since(startedAt).Round(time.Millisecond),
+	)
+
 	return nil
 }
 

@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"time"
 
 	"bird-zpi/downloader/internal/download"
 	"bird-zpi/downloader/internal/gugik"
 	"bird-zpi/downloader/internal/processor"
+	"bird-zpi/downloader/internal/trace"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -41,6 +44,12 @@ func (p *Publisher) ProcessFeature(ctx context.Context, job processor.Job) error
 }
 
 func (p *Publisher) publish(ctx context.Context, queue string, body []byte) error {
+	startedAt := time.Now()
+	messageID := trace.NewID()
+	requestID := trace.ID(ctx)
+	if requestID == "" {
+		requestID = messageID
+	}
 	channel, err := p.connection.Channel()
 	if err != nil {
 		return fmt.Errorf("open RabbitMQ channel: %w", err)
@@ -55,9 +64,12 @@ func (p *Publisher) publish(ctx context.Context, queue string, body []byte) erro
 	}
 
 	confirmation, err := channel.PublishWithDeferredConfirmWithContext(ctx, "", queue, false, false, amqp.Publishing{
-		ContentType:  "application/json",
-		DeliveryMode: amqp.Persistent,
-		Body:         body,
+		ContentType:   "application/json",
+		DeliveryMode:  amqp.Persistent,
+		CorrelationId: requestID,
+		MessageId:     messageID,
+		Timestamp:     time.Now().UTC(),
+		Body:          body,
 	})
 	if err != nil {
 		return fmt.Errorf("publish message to queue %q: %w", queue, err)
@@ -69,6 +81,14 @@ func (p *Publisher) publish(ctx context.Context, queue string, body []byte) erro
 	if !confirmed {
 		return fmt.Errorf("message to queue %q was rejected by RabbitMQ", queue)
 	}
+	log.Printf(
+		"event=message_published request_id=%q message_id=%q queue=%q bytes=%d duration=%s",
+		requestID,
+		messageID,
+		queue,
+		len(body),
+		time.Since(startedAt).Round(time.Millisecond),
+	)
 
 	return nil
 }
