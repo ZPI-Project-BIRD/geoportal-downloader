@@ -61,6 +61,11 @@ func (h *handler) discoverFeatures(ctx context.Context, data json.RawMessage) er
 	}
 
 	for _, feature := range collection.FeatureMembers {
+		if feature.OrthophotoIndex.Color != "RGB" {
+			slog.InfoContext(ctx, "DiscoverFeaturesSkipped", "project_id", projectID, "feature_id", feature.OrthophotoIndex.ID, "color", feature.OrthophotoIndex.Color)
+			continue
+		}
+
 		if err := h.createFeature(ctx, payload.ProjectID, &feature); err != nil {
 			return err
 		}
