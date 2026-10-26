@@ -1,13 +1,28 @@
 # Interfacing as an AI Backend
 
-The downloaded features are published in the `detect.feature` queue. Payload of messages in this queue allows identifing the subject.
-
-Newly downloaded features can also be polled the backend by issuing SQL queries to further ensure synchronization:
+The AI backend can atomically claim the oldest job that is pending, failed, or has
+been processing for more than 30 minutes:
 
 ```sql
-select f.*, j.status from "geoportal"."features" f
-left join "geoportal"."recognition_jobs" j on j.feature_id = f.id
-where f.downloaded and (j.id is null or j.status = '3_FAILED');
+WITH next_job AS (
+  SELECT j.id
+  FROM geoportal.recognition_jobs AS j
+  JOIN geoportal.features AS f ON f.id = j.feature_id
+  WHERE f.downloaded_at IS NOT NULL
+    AND (
+      j.status IN ('0_PENDING', '3_FAILED')
+      OR (j.status = '1_STARTED' AND j.started_at < NOW() - INTERVAL '30 minutes')
+    )
+  ORDER BY j.created_at ASC, j.id ASC
+  FOR UPDATE OF j SKIP LOCKED
+  LIMIT 1
+)
+UPDATE geoportal.recognition_jobs AS j
+SET status = '1_STARTED', started_at = NOW(), finished_at = NULL, error = NULL
+FROM next_job, geoportal.features AS f
+WHERE j.id = next_job.id AND f.id = j.feature_id
+RETURNING f.*, j.*;
 ```
 
-It is the backend's responsibility to ensure the state synchronization. Right after the event/poll gets received a `"geoportal"."recognition_jobs"` record need to get created/updated.
+The command returns no rows when no job is ready. `SKIP LOCKED` prevents
+concurrent backend workers from claiming the same job.

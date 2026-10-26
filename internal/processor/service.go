@@ -14,9 +14,8 @@ import (
 	"time"
 
 	"bird-zpi/downloader/internal/database"
+	"bird-zpi/downloader/internal/messaging"
 	"bird-zpi/downloader/internal/trace"
-
-	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 type ObjectStorage interface {
@@ -26,7 +25,7 @@ type ObjectStorage interface {
 
 type FeatureDatabase interface {
 	FeatureStatus(context.Context, string) (database.FeatureStatus, error)
-	MarkFeatureTiled(context.Context, string) error
+	MarkFeatureTiled(context.Context, string, int) error
 }
 
 type Service struct {
@@ -45,20 +44,20 @@ func NewService(featureDatabase FeatureDatabase, sourceStorage, tileStorage Obje
 	}
 }
 
-func (s *Service) HandleProcessFeature(ctx context.Context, delivery amqp.Delivery) error {
+func (s *Service) HandleProcessFeature(ctx context.Context, message messaging.Message) error {
 	startedAt := time.Now()
 	requestID := trace.ID(ctx)
 	var job Job
-	if err := json.Unmarshal(delivery.Body, &job); err != nil {
+	if err := json.Unmarshal(message.Body, &job); err != nil {
 		return fmt.Errorf("decode process feature job: %w", err)
 	}
-	if job.ProjectID == "" || job.FeatureID == "" || job.LayerID == "" || job.ObjectName == "" {
+	if job.ProjectID == "" || job.FeatureID == "" || job.ObjectName == "" {
 		return fmt.Errorf("process feature job requires projectId, featureId, layerId, and objectName")
 	}
 	log.Printf(
 		"event=feature_processing_started request_id=%q message_id=%q project_id=%q feature_id=%q object_name=%q",
 		requestID,
-		delivery.MessageId,
+		message.ID,
 		job.ProjectID,
 		job.FeatureID,
 		job.ObjectName,
@@ -71,13 +70,10 @@ func (s *Service) HandleProcessFeature(ctx context.Context, delivery amqp.Delive
 		return fmt.Errorf("process feature %q: downloaded feature does not exist", job.FeatureID)
 	}
 	if status.Tiled {
-		if err := delivery.Ack(false); err != nil {
-			return fmt.Errorf("acknowledge skipped process feature job: %w", err)
-		}
 		log.Printf(
 			"event=feature_processing_skipped request_id=%q message_id=%q feature_id=%q duration=%s",
 			requestID,
-			delivery.MessageId,
+			message.ID,
 			job.FeatureID,
 			time.Since(startedAt).Round(time.Millisecond),
 		)
@@ -125,7 +121,9 @@ func (s *Service) HandleProcessFeature(ctx context.Context, delivery amqp.Delive
 	)
 
 	uploadStartedAt := time.Now()
-	tileCount, err := s.uploadTiles(ctx, job.LayerID, tilesDirectory)
+	setID, _, _ := strings.Cut(job.FeatureID, ".")
+
+	tileCount, err := s.uploadTiles(ctx, setID, tilesDirectory)
 	if err != nil {
 		return err
 	}
@@ -139,18 +137,15 @@ func (s *Service) HandleProcessFeature(ctx context.Context, delivery amqp.Delive
 		tileCount,
 		time.Since(uploadStartedAt).Round(time.Millisecond),
 	)
-	if err := s.database.MarkFeatureTiled(ctx, job.FeatureID); err != nil {
+	if err := s.database.MarkFeatureTiled(ctx, job.FeatureID, tileCount); err != nil {
 		return err
 	}
 	log.Printf("event=feature_marked_tiled request_id=%q feature_id=%q", requestID, job.FeatureID)
 
-	if err := delivery.Ack(false); err != nil {
-		return fmt.Errorf("acknowledge process feature job: %w", err)
-	}
 	log.Printf(
 		"event=feature_processing_completed request_id=%q message_id=%q feature_id=%q tile_count=%d duration=%s",
 		requestID,
-		delivery.MessageId,
+		message.ID,
 		job.FeatureID,
 		tileCount,
 		time.Since(startedAt).Round(time.Millisecond),
