@@ -5,64 +5,62 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 type Client struct {
-	client *minio.Client
-	bucket string
+	s3       *s3.Client
+	uploader *transfermanager.Client
+	bucket   string
 }
 
-func New(ctx context.Context, endpoint, accessKey, secretKey, bucket string, secure bool) (*Client, error) {
-	minioClient, err := minio.New(endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
-		Secure: secure,
-	})
+func NewClient(ctx context.Context) (*s3.Client, error) {
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("create object storage client: %w", err)
+		return nil, fmt.Errorf("load AWS configuration: %w", err)
 	}
-
-	client := &Client{client: minioClient, bucket: bucket}
-	exists, err := minioClient.BucketExists(ctx, bucket)
-	if err != nil {
-		return nil, fmt.Errorf("check object storage bucket %q: %w", bucket, err)
-	}
-	if !exists {
-		if err := minioClient.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
-			return nil, fmt.Errorf("create object storage bucket %q: %w", bucket, err)
-		}
-	}
-
-	return client, nil
+	return s3.NewFromConfig(cfg), nil
 }
 
-func (c *Client) Upload(ctx context.Context, objectName string, reader io.Reader, size int64, contentType string) (int64, error) {
+func New(client *s3.Client, bucket string) *Client {
+	return &Client{
+		s3:       client,
+		uploader: transfermanager.New(client),
+		bucket:   bucket,
+	}
+}
+
+func (c *Client) Upload(ctx context.Context, objectName string, reader io.Reader, _ int64, contentType string) (int64, error) {
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 
-	info, err := c.client.PutObject(ctx, c.bucket, objectName, reader, size, minio.PutObjectOptions{
-		ContentType: contentType,
+	output, err := c.uploader.UploadObject(ctx, &transfermanager.UploadObjectInput{
+		Bucket:      aws.String(c.bucket),
+		Key:         aws.String(objectName),
+		Body:        reader,
+		ContentType: aws.String(contentType),
 	})
 	if err != nil {
 		return 0, fmt.Errorf("upload object %q to bucket %q: %w", objectName, c.bucket, err)
 	}
-	return info.Size, nil
+	return aws.ToInt64(output.ContentLength), nil
 }
 
 func (c *Client) Download(ctx context.Context, objectName string, writer io.Writer) (int64, error) {
-	object, err := c.client.GetObject(ctx, c.bucket, objectName, minio.GetObjectOptions{})
+	object, err := c.s3.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(objectName),
+	})
 	if err != nil {
-		return 0, fmt.Errorf("open object %q from bucket %q: %w", objectName, c.bucket, err)
+		return 0, fmt.Errorf("get object %q from bucket %q: %w", objectName, c.bucket, err)
 	}
-	defer object.Close()
+	defer object.Body.Close()
 
-	if _, err := object.Stat(); err != nil {
-		return 0, fmt.Errorf("stat object %q from bucket %q: %w", objectName, c.bucket, err)
-	}
-
-	written, err := io.Copy(writer, object)
+	written, err := io.Copy(writer, object.Body)
 	if err != nil {
 		return written, fmt.Errorf("download object %q from bucket %q: %w", objectName, c.bucket, err)
 	}

@@ -5,107 +5,97 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 
+	"bird-zpi/downloader/internal/messaging"
 	"bird-zpi/downloader/internal/trace"
 
-	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
 const (
-	retryDelay  = 5 * time.Second
-	maxRetries  = int32(5)
-	retryHeader = "x-retry-count"
+	retryDelaySeconds  = int32(5)
+	requestIDAttribute = "request-id"
 )
 
-func Run(ctx context.Context, rabbitMQURL, queue string, handle func(context.Context, amqp.Delivery) error) error {
-	connection, err := amqp.Dial(rabbitMQURL)
-	if err != nil {
-		return fmt.Errorf("connect to RabbitMQ: %w", err)
-	}
-	defer connection.Close()
+type Client interface {
+	ReceiveMessage(context.Context, *awssqs.ReceiveMessageInput, ...func(*awssqs.Options)) (*awssqs.ReceiveMessageOutput, error)
+	DeleteMessage(context.Context, *awssqs.DeleteMessageInput, ...func(*awssqs.Options)) (*awssqs.DeleteMessageOutput, error)
+	ChangeMessageVisibility(context.Context, *awssqs.ChangeMessageVisibilityInput, ...func(*awssqs.Options)) (*awssqs.ChangeMessageVisibilityOutput, error)
+}
 
-	channel, err := connection.Channel()
-	if err != nil {
-		return fmt.Errorf("open RabbitMQ channel: %w", err)
-	}
-	defer channel.Close()
-
-	if _, err := channel.QueueDeclare(queue, true, false, false, false, nil); err != nil {
-		return fmt.Errorf("declare queue %q: %w", queue, err)
-	}
-	if err := channel.Qos(1, 0, false); err != nil {
-		return fmt.Errorf("configure worker prefetch: %w", err)
-	}
-
-	deliveries, err := channel.ConsumeWithContext(ctx, queue, "", false, false, false, false, nil)
-	if err != nil {
-		return fmt.Errorf("consume queue %q: %w", queue, err)
-	}
-
-	for delivery := range deliveries {
-		startedAt := time.Now()
-		if delivery.CorrelationId == "" {
-			delivery.CorrelationId = trace.NewID()
-		}
-		if delivery.MessageId == "" {
-			delivery.MessageId = trace.NewID()
-		}
-		requestID := delivery.CorrelationId
-		retryCount := deliveryRetryCount(delivery)
-		log.Printf(
-			"event=message_received request_id=%q message_id=%q queue=%q retry=%d",
-			requestID,
-			delivery.MessageId,
-			queue,
-			retryCount,
-		)
-		handlerContext := trace.WithID(ctx, requestID)
-		if err := handle(handlerContext, delivery); err != nil {
-			if retryCount >= maxRetries {
-				log.Printf(
-					"event=message_discarded request_id=%q message_id=%q queue=%q retry=%d duration=%s error=%q",
-					requestID,
-					delivery.MessageId,
-					queue,
-					retryCount,
-					time.Since(startedAt).Round(time.Millisecond),
-					err,
-				)
-				if nackErr := delivery.Nack(false, false); nackErr != nil {
-					return fmt.Errorf("reject message from queue %q: %w", queue, nackErr)
-				}
-				continue
+func Run(ctx context.Context, client Client, queueURL string, handle func(context.Context, messaging.Message) error) error {
+	for ctx.Err() == nil {
+		output, err := client.ReceiveMessage(ctx, &awssqs.ReceiveMessageInput{
+			QueueUrl:              aws.String(queueURL),
+			MaxNumberOfMessages:   1,
+			WaitTimeSeconds:       20,
+			MessageAttributeNames: []string{requestIDAttribute},
+			MessageSystemAttributeNames: []types.MessageSystemAttributeName{
+				types.MessageSystemAttributeNameApproximateReceiveCount,
+			},
+		})
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				break
 			}
+			return fmt.Errorf("receive message from queue %q: %w", queueURL, err)
+		}
+		if len(output.Messages) == 0 {
+			continue
+		}
 
-			nextRetry := retryCount + 1
+		delivery := output.Messages[0]
+		startedAt := time.Now()
+		messageID := aws.ToString(delivery.MessageId)
+		requestID := messageRequestID(delivery)
+		receiveCount := messageReceiveCount(delivery)
+		log.Printf(
+			"event=message_received request_id=%q message_id=%q queue_url=%q receive_count=%d",
+			requestID,
+			messageID,
+			queueURL,
+			receiveCount,
+		)
+
+		handlerContext := trace.WithID(ctx, requestID)
+		message := messaging.Message{ID: messageID, Body: []byte(aws.ToString(delivery.Body))}
+		if err := handle(handlerContext, message); err != nil {
 			log.Printf(
-				"event=message_retry_scheduled request_id=%q message_id=%q queue=%q retry=%d max_retries=%d delay=%s duration=%s error=%q",
+				"event=message_failed request_id=%q message_id=%q queue_url=%q receive_count=%d retry_delay_seconds=%d duration=%s error=%q",
 				requestID,
-				delivery.MessageId,
-				queue,
-				nextRetry,
-				maxRetries,
-				retryDelay,
+				messageID,
+				queueURL,
+				receiveCount,
+				retryDelaySeconds,
 				time.Since(startedAt).Round(time.Millisecond),
 				err,
 			)
-			time.Sleep(retryDelay)
-
-			if err := channel.PublishWithContext(ctx, "", queue, false, false, retryPublishing(delivery, nextRetry)); err != nil {
-				return fmt.Errorf("republish message to queue %q for retry: %w", queue, err)
-			}
-			if err := delivery.Ack(false); err != nil {
-				return fmt.Errorf("acknowledge retried message from queue %q: %w", queue, err)
+			if _, visibilityErr := client.ChangeMessageVisibility(ctx, &awssqs.ChangeMessageVisibilityInput{
+				QueueUrl:          aws.String(queueURL),
+				ReceiptHandle:     delivery.ReceiptHandle,
+				VisibilityTimeout: retryDelaySeconds,
+			}); visibilityErr != nil {
+				return fmt.Errorf("schedule message retry on queue %q: %w", queueURL, visibilityErr)
 			}
 			continue
 		}
+
+		if _, err := client.DeleteMessage(ctx, &awssqs.DeleteMessageInput{
+			QueueUrl:      aws.String(queueURL),
+			ReceiptHandle: delivery.ReceiptHandle,
+		}); err != nil {
+			return fmt.Errorf("delete message from queue %q: %w", queueURL, err)
+		}
 		log.Printf(
-			"event=message_completed request_id=%q message_id=%q queue=%q retry=%d duration=%s",
+			"event=message_completed request_id=%q message_id=%q queue_url=%q receive_count=%d duration=%s",
 			requestID,
-			delivery.MessageId,
-			queue,
-			retryCount,
+			messageID,
+			queueURL,
+			receiveCount,
 			time.Since(startedAt).Round(time.Millisecond),
 		)
 	}
@@ -113,38 +103,22 @@ func Run(ctx context.Context, rabbitMQURL, queue string, handle func(context.Con
 	if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
-
 	return nil
 }
 
-func deliveryRetryCount(delivery amqp.Delivery) int32 {
-	if count, ok := delivery.Headers[retryHeader].(int32); ok && count > 0 {
-		return count
+func messageRequestID(message types.Message) string {
+	if attribute, ok := message.MessageAttributes[requestIDAttribute]; ok {
+		if requestID := aws.ToString(attribute.StringValue); requestID != "" {
+			return requestID
+		}
 	}
-	return 0
+	return trace.NewID()
 }
 
-func retryPublishing(delivery amqp.Delivery, retryCount int32) amqp.Publishing {
-	headers := make(amqp.Table, len(delivery.Headers)+1)
-	for key, value := range delivery.Headers {
-		headers[key] = value
+func messageReceiveCount(message types.Message) int {
+	count, err := strconv.Atoi(message.Attributes[string(types.MessageSystemAttributeNameApproximateReceiveCount)])
+	if err != nil {
+		return 1
 	}
-	headers[retryHeader] = retryCount
-
-	return amqp.Publishing{
-		Headers:         headers,
-		ContentType:     delivery.ContentType,
-		ContentEncoding: delivery.ContentEncoding,
-		DeliveryMode:    delivery.DeliveryMode,
-		Priority:        delivery.Priority,
-		CorrelationId:   delivery.CorrelationId,
-		ReplyTo:         delivery.ReplyTo,
-		Expiration:      delivery.Expiration,
-		MessageId:       delivery.MessageId,
-		Timestamp:       delivery.Timestamp,
-		Type:            delivery.Type,
-		UserId:          delivery.UserId,
-		AppId:           delivery.AppId,
-		Body:            delivery.Body,
-	}
+	return count
 }

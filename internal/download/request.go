@@ -4,6 +4,8 @@ import "errors"
 
 var ErrFeatureNotFound = errors.New("feature not found")
 
+var ErrProjectNotFound = errors.New("project not found")
+
 type RetryAction string
 
 const (
@@ -12,14 +14,7 @@ const (
 	RetryAlreadyComplete RetryAction = "already_complete"
 )
 
-type Point struct {
-	X float64
-	Y float64
-}
-
 type CreateRequest struct {
-	ProjectID   string
-	Layer       string
-	TopLeft     Point
-	BottomRight Point
+	ProjectID string
+	Layer     string
 }

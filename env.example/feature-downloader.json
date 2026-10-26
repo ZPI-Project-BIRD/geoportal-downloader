@@ -1,0 +1,9 @@
+{
+  "Variables": {
+    "DATABASE_URL": "postgresql://app:app@host.docker.internal:5432/app",
+    "SQS_DOWNLOAD_QUEUE_URL": "http://localhost.floci.io:4566/000000000000/download-feature",
+    "SQS_PROCESS_QUEUE_URL": "http://localhost.floci.io:4566/000000000000/process-feature",
+    "SQS_DETECTION_QUEUE_URL": "http://localhost.floci.io:4566/000000000000/detect-feature",
+    "S3_SOURCE_BUCKET": "features"
+  }
+}
