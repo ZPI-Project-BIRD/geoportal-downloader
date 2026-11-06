@@ -14,6 +14,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"time"
 
@@ -83,7 +84,9 @@ func (h *handler) discoverFeatures(ctx context.Context, data json.RawMessage) er
 func (h *handler) fetch(ctx context.Context, area database.ProjectArea) (*gugik.FeatureCollection, error) {
 	fetchStartedAt := time.Now()
 
-	bbox := fmt.Sprintf("%.2f,%.2f,%.2f,%.2f,EPSG:2180", area.TopLeft.X, area.TopLeft.Y, area.BottomRight.X, area.BottomRight.Y)
+	minE, maxE := math.Min(area.TopLeft.X, area.BottomRight.X), math.Max(area.TopLeft.X, area.BottomRight.X)
+	minN, maxN := math.Min(area.TopLeft.Y, area.BottomRight.Y), math.Max(area.TopLeft.Y, area.BottomRight.Y)
+	bbox := fmt.Sprintf("%.2f,%.2f,%.2f,%.2f,EPSG:2180", minN, minE, maxN, maxE)
 	url := fmt.Sprintf("https://mapy.geoportal.gov.pl/wss/service/PZGIK/ORTO/WFS/Skorowidze?SERVICE=WFS&VERSION=1.1.0&REQUEST=GetFeature&TYPENAME=gugik:SkorowidzOrtofomapy2025&SRSNAME=EPSG:2180&BBOX=%s", bbox)
 
 	res, err := requests.RetryableRequest(h.http, url)
